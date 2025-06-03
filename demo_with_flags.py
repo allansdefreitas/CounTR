@@ -1,48 +1,32 @@
 import time
 import numpy as np
 from PIL import Image
-
 import torch
 import torch.nn as nn
 import torchvision
 from torchvision import transforms
 import torchvision.transforms.functional as TF
-
 import timm
+import argparse
+import os
 
 assert "0.4.5" <= timm.__version__ <= "0.4.9"  # version check
-
 from util.misc import make_grid
 import models_mae_cross
 
 device = torch.device('cuda')
 
-"""
-python demo.py
-"""
-
-
 class measure_time(object):
     def __enter__(self):
         self.start = time.perf_counter_ns()
         return self
-
     def __exit__(self, typ, value, traceback):
         self.duration = (time.perf_counter_ns() - self.start) / 1e9
 
-
-def load_image():
-    # im_dir = './data/FSC147_384_V2/images_384_VarV2'
-    # im_id = '249.jpg'
-    
-    im_dir = './data/ovos_test/'
-    im_id = 'ASF_CP4_base_grid_7.jpg'
-
-    image = Image.open('{}/{}'.format(im_dir, im_id))
+def load_image(input_path):
+    image = Image.open(input_path)
     image.load()
     W, H = image.size
-
-    # Resize the image size so that the height is 384
     new_H = 384
     new_W = 16 * int((W / H * 384) / 16)
     scale_factor_H = float(new_H) / H
@@ -50,9 +34,6 @@ def load_image():
     image = transforms.Resize((new_H, new_W))(image)
     Normalize = transforms.Compose([transforms.ToTensor()])
     image = Normalize(image)
-
-    # Coordinates of the exemplar bound boxes
-    # The left upper corner and the right lower corner
     bboxes = [
         [[136, 98], [173, 127]],
         [[209, 125], [242, 150]],
@@ -69,16 +50,13 @@ def load_image():
         bbox = image[:, y1:y2 + 1, x1:x2 + 1]
         bbox = transforms.Resize((64, 64))(bbox)
         boxes.append(bbox.numpy())
-
     boxes = np.array(boxes)
     boxes = torch.Tensor(boxes)
+    im_id = os.path.basename(input_path).split('.')[0]
+    return image, boxes, rects, im_id
 
-    return image, boxes, rects
-
-
-def run_one_image(samples, boxes, pos, model):
+def run_one_image(samples, boxes, pos, model, im_id, result_path):
     _, _, h, w = samples.shape
-
     s_cnt = 0
     for rect in pos:
         if rect[2] - rect[0] < 10 and rect[3] - rect[1] < 10:
@@ -86,16 +64,15 @@ def run_one_image(samples, boxes, pos, model):
     if s_cnt >= 1:
         r_densities = []
         r_images = []
-        r_images.append(TF.crop(samples[0], 0, 0, int(h / 3), int(w / 3)))  # 1
-        r_images.append(TF.crop(samples[0], 0, int(w / 3), int(h / 3), int(w / 3)))  # 3
-        r_images.append(TF.crop(samples[0], 0, int(w * 2 / 3), int(h / 3), int(w / 3)))  # 7
-        r_images.append(TF.crop(samples[0], int(h / 3), 0, int(h / 3), int(w / 3)))  # 2
-        r_images.append(TF.crop(samples[0], int(h / 3), int(w / 3), int(h / 3), int(w / 3)))  # 4
-        r_images.append(TF.crop(samples[0], int(h / 3), int(w * 2 / 3), int(h / 3), int(w / 3)))  # 8
-        r_images.append(TF.crop(samples[0], int(h * 2 / 3), 0, int(h / 3), int(w / 3)))  # 5
-        r_images.append(TF.crop(samples[0], int(h * 2 / 3), int(w / 3), int(h / 3), int(w / 3)))  # 6
-        r_images.append(TF.crop(samples[0], int(h * 2 / 3), int(w * 2 / 3), int(h / 3), int(w / 3)))  # 9
-
+        r_images.append(TF.crop(samples[0], 0, 0, int(h / 3), int(w / 3)))
+        r_images.append(TF.crop(samples[0], 0, int(w / 3), int(h / 3), int(w / 3)))
+        r_images.append(TF.crop(samples[0], 0, int(w * 2 / 3), int(h / 3), int(w / 3)))
+        r_images.append(TF.crop(samples[0], int(h / 3), 0, int(h / 3), int(w / 3)))
+        r_images.append(TF.crop(samples[0], int(h / 3), int(w / 3), int(h / 3), int(w / 3)))
+        r_images.append(TF.crop(samples[0], int(h / 3), int(w * 2 / 3), int(h / 3), int(w / 3)))
+        r_images.append(TF.crop(samples[0], int(h * 2 / 3), 0, int(h / 3), int(w / 3)))
+        r_images.append(TF.crop(samples[0], int(h * 2 / 3), int(w / 3), int(h / 3), int(w / 3)))
+        r_images.append(TF.crop(samples[0], int(h * 2 / 3), int(w * 2 / 3), int(h / 3), int(w / 3)))
         pred_cnt = 0
         with measure_time() as et:
             for r_image in r_images:
@@ -112,15 +89,12 @@ def run_one_image(samples, boxes, pos, model):
                         d1 = b1(output[:, 0:prev - start + 1])
                         b2 = nn.ZeroPad2d(padding=(prev + 1, w - start - 384, 0, 0))
                         d2 = b2(output[:, prev - start + 1:384])
-
                         b3 = nn.ZeroPad2d(padding=(0, w - start, 0, 0))
                         density_map_l = b3(density_map[:, 0:start])
                         density_map_m = b1(density_map[:, start:prev + 1])
                         b4 = nn.ZeroPad2d(padding=(prev + 1, 0, 0, 0))
                         density_map_r = b4(density_map[:, prev + 1:w])
-
                         density_map = density_map_l + density_map_r + density_map_m / 2 + d1 / 2 + d2
-
                         prev = start + 383
                         start = start + 128
                         if start + 383 >= w:
@@ -128,7 +102,6 @@ def run_one_image(samples, boxes, pos, model):
                                 break
                             else:
                                 start = w - 384
-
                 pred_cnt += torch.sum(density_map / 60).item()
                 r_densities += [density_map]
     else:
@@ -145,15 +118,12 @@ def run_one_image(samples, boxes, pos, model):
                     d1 = b1(output[:, 0:prev - start + 1])
                     b2 = nn.ZeroPad2d(padding=(prev + 1, w - start - 384, 0, 0))
                     d2 = b2(output[:, prev - start + 1:384])
-
                     b3 = nn.ZeroPad2d(padding=(0, w - start, 0, 0))
                     density_map_l = b3(density_map[:, 0:start])
                     density_map_m = b1(density_map[:, start:prev + 1])
                     b4 = nn.ZeroPad2d(padding=(prev + 1, 0, 0, 0))
                     density_map_r = b4(density_map[:, prev + 1:w])
-
                     density_map = density_map_l + density_map_r + density_map_m / 2 + d1 / 2 + d2
-
                     prev = start + 383
                     start = start + 128
                     if start + 383 >= w:
@@ -161,17 +131,13 @@ def run_one_image(samples, boxes, pos, model):
                             break
                         else:
                             start = w - 384
-
             pred_cnt = torch.sum(density_map / 60).item()
-
     e_cnt = 0
     for rect in pos:
         e_cnt += torch.sum(density_map[rect[0]:rect[2] + 1, rect[1]:rect[3] + 1] / 60).item()
     e_cnt = e_cnt / 3
     if e_cnt > 1.8:
         pred_cnt /= e_cnt
-
-    # Visualize the prediction
     fig = samples[0]
     box_map = torch.zeros([fig.shape[1], fig.shape[2]])
     box_map = box_map.to(device, non_blocking=True)
@@ -187,33 +153,43 @@ def run_one_image(samples, boxes, pos, model):
         else make_grid(r_densities, h, w).unsqueeze(0).repeat(3, 1, 1)
     fig = fig + box_map + pred / 2
     fig = torch.clamp(fig, 0, 1)
-    torchvision.utils.save_image(fig, f'./result/Visualisation.png')
-    # torchvision.utils.save_image(fig, f'./image/{img_id}_result.png')
-
-    
-    # GT map needs coordinates for all GT dots, which is hard to input and is not a must for the demo. You can provide it yourself.
+    torchvision.utils.save_image(fig, result_path)
     return pred_cnt, et
 
+def main():
+    parser = argparse.ArgumentParser(description='Process an image for density estimation.')
+    parser.add_argument('--input', type=str, required=True, help='Path to the input image (including folder and filename)')
+    parser.add_argument('--result', type=str, required=True, help='Directory to save the result image and count file')
+    parser.add_argument('--weights', type=str, required=True, help='Path to the model weights file')
+    args = parser.parse_args()
 
+    # Construir o caminho do arquivo de saída (imagem)
+    im_name, im_ext = os.path.splitext(os.path.basename(args.input))
+    result_path = os.path.join(args.result, f"{im_name}_result{im_ext}")
+    # Construir o caminho do arquivo de texto
+    txt_path = os.path.join(args.result, f"{im_name}_result.txt")
+    # Criar o diretório de saída, se não existir
+    os.makedirs(args.result, exist_ok=True)
 
+    # Prepare model
+    model = models_mae_cross.__dict__['mae_vit_base_patch16'](norm_pix_loss='store_true')
+    model.to(device)
+    model_without_ddp = model
+    checkpoint = torch.load(args.weights, map_location='cpu')
+    model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+    print(f"Resume checkpoint {args.weights}")
+    model.eval()
 
+    # Test on the new image
+    samples, boxes, pos, im_id = load_image(args.input)
+    samples = samples.unsqueeze(0).to(device, non_blocking=True)
+    boxes = boxes.unsqueeze(0).to(device, non_blocking=True)
+    result, elapsed_time = run_one_image(samples, boxes, pos, model, im_id, result_path)
+    print(result, elapsed_time.duration)
 
+    # Salvar a quantidade predita em um arquivo .txt
+    with open(txt_path, 'w') as f:
+        f.write(str(result))
 
-# Prepare model
-model = models_mae_cross.__dict__['mae_vit_base_patch16'](norm_pix_loss='store_true')
-model.to(device)
-model_without_ddp = model
-
-checkpoint = torch.load('./CARPK.pth', map_location='cpu')
-model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
-print("Resume checkpoint %s" % './CARPK.pth')
-
-model.eval()
-
-# Test on the new image
-samples, boxes, pos = load_image()
-samples = samples.unsqueeze(0).to(device, non_blocking=True)
-boxes = boxes.unsqueeze(0).to(device, non_blocking=True)
-
-result, elapsed_time = run_one_image(samples, boxes, pos, model)
-print(result, elapsed_time.duration)
+if __name__ == '__main__':
+    main()
